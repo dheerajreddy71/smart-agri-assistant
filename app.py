@@ -2,15 +2,98 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
 from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestClassifier
 from googletrans import Translator
+
+# API keys
+geocoding_api_key = '80843f03ed6b4945a45f1bd8c51e5c2f'
+weather_api_key = 'b53305cd6b960c1984aed0acaf76aa2e'
+
+# Translator setup
+translator = Translator()
+
+# Function to translate text based on selected language
+def translate_text(text, dest_lang):
+    try:
+        translation = translator.translate(text, dest=dest_lang)
+        return translation.text
+    except Exception as e:
+        st.error(f"Translation error: {e}")
+        return text
+
+# Function to get geolocation
+def get_lat_lon(village_name):
+    geocoding_url = f'https://api.opencagedata.com/geocode/v1/json?q={village_name}&key={geocoding_api_key}'
+    try:
+        response = requests.get(geocoding_url)
+        response.raise_for_status()
+        data = response.json()
+        if data['results']:
+            latitude = data['results'][0]['geometry']['lat']
+            longitude = data['results'][0]['geometry']['lng']
+            return latitude, longitude
+        else:
+            return None, None
+    except Exception as e:
+        st.error(f"Error fetching geocoding data: {e}")
+        return None, None
+
+# Function to get weather forecast
+def get_weather_forecast(latitude, longitude, dest_lang):
+    weather_url = f'https://api.openweathermap.org/data/2.5/forecast?lat={latitude}&lon={longitude}&units=metric&cnt=40&appid={weather_api_key}'
+    try:
+        response = requests.get(weather_url)
+        response.raise_for_status()
+        data = response.json()
+        if data['cod'] == '200':
+            forecast = []
+            for item in data['list']:
+                date_time = item['dt_txt']
+                date, time = date_time.split(' ')
+                weather_desc = translate_text(item['weather'][0]['description'], dest_lang)
+                forecast.append({
+                    'date': date,
+                    'time': time,
+                    'temp': item['main']['temp'],
+                    'pressure': item['main']['pressure'],
+                    'humidity': item['main']['humidity'],
+                    'weather': weather_desc
+                })
+            return forecast
+        else:
+            st.error(f"Error fetching weather data: {data.get('message', 'Unknown error')}")
+            return None
+    except Exception as e:
+        st.error(f"Error fetching weather data: {e}")
+        return None
+
+# Load and preprocess data for fertilizer recommendation
+url = 'https://raw.githubusercontent.com/dheerajreddy71/Design_Project/main/fertilizer_recommendation.csv'
+data = pd.read_csv(url)
+data.rename(columns={'Humidity ':'Humidity','Soil Type':'Soil_Type','Crop Type':'Crop_Type','Fertilizer Name':'Fertilizer'}, inplace=True)
+data.dropna(inplace=True)
+
+# Encode categorical variables
+encode_soil = LabelEncoder()
+data.Soil_Type = encode_soil.fit_transform(data.Soil_Type)
+
+encode_crop = LabelEncoder()
+data.Crop_Type = encode_crop.fit_transform(data.Crop_Type)
+
+encode_ferti = LabelEncoder()
+data.Fertilizer = encode_ferti.fit_transform(data.Fertilizer)
+
+# Split the data into train and test sets
+x_train, x_test, y_train, y_test = train_test_split(data.drop('Fertilizer', axis=1), data.Fertilizer, test_size=0.2, random_state=1)
+
+# Train a Random Forest Classifier
+rand = RandomForestClassifier()
+rand.fit(x_train, y_train)
 
 # Load and prepare datasets for yield prediction
 yield_df = pd.read_csv("https://github.com/dheerajreddy71/Design_Project/raw/main/yield_df.csv")
@@ -112,207 +195,15 @@ price_y = price_data[['min_price', 'max_price', 'modal_price']]
 
 price_encoder = ColumnTransformer(
     transformers=[
-        ('cat', OneHotEncoder(), ['state', 'district', 'market', 'commodity', 'variety'])
+        ('cat', OneHotEncoder(), ['state', 'district', 'market', 'commodity'])
     ],
     remainder='passthrough'
 )
 
 price_X_encoded = price_encoder.fit_transform(price_X)
 price_X_train, price_X_test, price_y_train, price_y_test = train_test_split(price_X_encoded, price_y, test_size=0.2, random_state=42)
-
 price_model = LinearRegression()
 price_model.fit(price_X_train, price_y_train)
-
-# Streamlit app
-st.set_page_config(page_title="Smart Agri Assistant", layout="wide", page_icon="🌾")
-
-# Add a background image
-page_bg_img = '''
-<style>
-.stApp {
-background-image: url("https://github.com/dheerajreddy71/Webbuild/raw/main/background.jpg");
-background-size: cover;
-}
-</style>
-'''
-st.markdown(page_bg_img, unsafe_allow_html=True)
-
-st.title("Smart Agri Assistant")
-
-
-
-
-# Yield Prediction
-st.header("Predict Crop Yield")
-year = st.number_input("Year", min_value=2000, max_value=2100, value=2024)
-rainfall = st.number_input("Average Rainfall (mm per year)")
-pesticides = st.number_input("Pesticides Used (tonnes)")
-temp = st.number_input("Average Temperature (°C)")
-area = st.text_input("Area(Country)")
-item = st.text_input("Item(Crop Name)")
-
-if st.button("Predict Yield"):
-    features = {
-        'Year': year,
-        'average_rain_fall_mm_per_year': rainfall,
-        'pesticides_tonnes': pesticides,
-        'avg_temp': temp,
-        'Area': area,
-        'Item': item,
-    }
-    features_array = np.array([[features['Year'], features['average_rain_fall_mm_per_year'],
-                                features['pesticides_tonnes'], features['avg_temp'],
-                                features['Area'], features['Item']]], dtype=object)
-    transformed_features = yield_preprocessor.transform(features_array)
-    predicted_yield = yield_model.predict(transformed_features).reshape(1, -1)
-    st.success(f"The predicted yield is {predicted_yield[0][0]:.2f} hectograms (hg) per hectare (ha).")
-
-# Crop Recommendation
-st.header("Recommend Crops")
-N = st.number_input("Nitrogen (N)", min_value=0.0)
-P = st.number_input("Phosphorus (P)", min_value=0.0)
-K = st.number_input("Potassium (K)", min_value=0.0)
-temperature = st.number_input("Temperature (°C)", min_value=0.0)
-humidity = st.number_input("Humidity (%)", min_value=0.0)
-ph = st.number_input("Soil pH", min_value=0.0)
-rainfall = st.number_input("Rainfall (mm)", min_value=0.0)
-
-if st.button("Recommend Crop"):
-    crop_features = [N, P, K, temperature, humidity, ph, rainfall]
-    recommended_crop = crop_model.predict([crop_features])[0]
-    st.success(f"Recommended Crop: {recommended_crop}")
-
-# Crop Requirements and Pest Warnings
-st.header("Predict Crop Requirements and Pest Warnings")
-crop_name = st.text_input("Crop Name")
-
-if st.button("Calculate"):
-    humidity, temperature = predict_requirements(crop_name)
-    pest_warning = predict_pest_warnings(crop_name)
-    if humidity is not None and temperature is not None:
-        st.info(f"Humidity Required: {humidity}%")
-        st.info(f"Temperature Required: {temperature:.2f}°F")
-    else:
-        st.warning("Crop not found.")
-    st.info(f"Pest Warnings: {pest_warning}")
-
-# Crop Price Prediction
-st.header("Predict Crop Prices")
-state = st.text_input("State")
-district = st.text_input("District")
-market = st.text_input("Market")
-commodity = st.text_input("Commodity")
-variety = st.text_input("Variety")
-arrival_date = st.date_input("Arrival Date")
-
-if st.button("Predict Prices"):
-    if not all([state, district, market, commodity, variety, arrival_date]):
-        st.error("Please provide all inputs.")
-    else:
-        input_data = {
-            'state': state,
-            'district': district,
-            'market': market,
-            'commodity': commodity,
-            'variety': variety,
-            'arrival_date': pd.to_datetime(arrival_date)
-        }
-
-        input_df = pd.DataFrame([input_data])
-        input_df['day'] = input_df['arrival_date'].dt.day
-        input_df['month'] = input_df['arrival_date'].dt.month
-        input_df['year'] = input_df['arrival_date'].dt.year
-        input_df.drop(['arrival_date'], axis=1, inplace=True)
-        input_encoded = price_encoder.transform(input_df)
-
-        predicted_prices = price_model.predict(input_encoded)
-        min_price, max_price, modal_price = predicted_prices[0]
-        st.success(f"Predicted Prices - Min: {min_price}, Max: {max_price}, Modal: {modal_price}")
-
-# API keys
-geocoding_api_key = '80843f03ed6b4945a45f1bd8c51e5c2f'
-weather_api_key = 'b53305cd6b960c1984aed0acaf76aa2e'
-
-# Translator setup
-translator = Translator()
-
-# Function to translate text based on selected language
-def translate_text(text, dest_lang):
-    try:
-        translation = translator.translate(text, dest=dest_lang)
-        return translation.text
-    except Exception as e:
-        st.error(f"Translation error: {e}")
-        return text
-
-# Function to get geolocation
-def get_lat_lon(village_name):
-    geocoding_url = f'https://api.opencagedata.com/geocode/v1/json?q={village_name}&key={geocoding_api_key}'
-    try:
-        response = requests.get(geocoding_url)
-        response.raise_for_status()
-        data = response.json()
-        if data['results']:
-            latitude = data['results'][0]['geometry']['lat']
-            longitude = data['results'][0]['geometry']['lng']
-            return latitude, longitude
-        else:
-            return None, None
-    except Exception as e:
-        st.error(f"Error fetching geocoding data: {e}")
-        return None, None
-
-# Function to get weather forecast
-def get_weather_forecast(latitude, longitude, dest_lang):
-    weather_url = f'https://api.openweathermap.org/data/2.5/forecast?lat={latitude}&lon={longitude}&units=metric&cnt=40&appid={weather_api_key}'
-    try:
-        response = requests.get(weather_url)
-        response.raise_for_status()
-        data = response.json()
-        if data['cod'] == '200':
-            forecast = []
-            for item in data['list']:
-                date_time = item['dt_txt']
-                date, time = date_time.split(' ')
-                weather_desc = translate_text(item['weather'][0]['description'], dest_lang)
-                forecast.append({
-                    'date': date,
-                    'time': time,
-                    'temp': item['main']['temp'],
-                    'pressure': item['main']['pressure'],
-                    'humidity': item['main']['humidity'],
-                    'weather': weather_desc
-                })
-            return forecast
-        else:
-            st.error(f"Error fetching weather data: {data.get('message', 'Unknown error')}")
-            return None
-    except Exception as e:
-        st.error(f"Error fetching weather data: {e}")
-        return None
-
-# Load and preprocess data for fertilizer recommendation
-url = 'https://raw.githubusercontent.com/dheerajreddy71/Design_Project/main/fertilizer_recommendation.csv'
-data = pd.read_csv(url)
-data.rename(columns={'Humidity ':'Humidity','Soil Type':'Soil_Type','Crop Type':'Crop_Type','Fertilizer Name':'Fertilizer'}, inplace=True)
-data.dropna(inplace=True)
-
-# Encode categorical variables
-encode_soil = LabelEncoder()
-data.Soil_Type = encode_soil.fit_transform(data.Soil_Type)
-
-encode_crop = LabelEncoder()
-data.Crop_Type = encode_crop.fit_transform(data.Crop_Type)
-
-encode_ferti = LabelEncoder()
-data.Fertilizer = encode_ferti.fit_transform(data.Fertilizer)
-
-# Split the data into train and test sets
-x_train, x_test, y_train, y_test = train_test_split(data.drop('Fertilizer', axis=1), data.Fertilizer, test_size=0.2, random_state=1)
-
-# Train a Random Forest Classifier
-rand = RandomForestClassifier()
-rand.fit(x_train, y_train)
 
 # Streamlit app
 st.set_page_config(page_title="Smart Agri Assistant", layout="wide", page_icon="🌾")
@@ -377,5 +268,77 @@ if st.button(translate_text('Predict Fertilizer', dest_lang), key='predict_ferti
         prediction = rand.predict([[temperature, humidity, moisture, soil_type_encoded, crop_type_encoded, nitrogen, potassium, phosphorous]])
         recommended_fertilizer = encode_ferti.inverse_transform(prediction)[0]
         st.write(translate_text(f"Recommended Fertilizer: {recommended_fertilizer}", dest_lang))
+    except Exception as e:
+        st.error(translate_text(f"Error: {e}", dest_lang))
+
+# Yield Prediction Section
+st.header(translate_text("Crop Yield Prediction", dest_lang))
+
+# Input fields for crop yield prediction
+year = st.number_input(translate_text('Year', dest_lang), format="%d", key='year_input')
+average_rain_fall = st.number_input(translate_text('Average Rainfall (mm/year)', dest_lang), format="%.2f", key='rainfall_input')
+pesticides_tonnes = st.number_input(translate_text('Pesticides (tonnes)', dest_lang), format="%.2f", key='pesticides_input')
+avg_temp = st.number_input(translate_text('Average Temperature (°C)', dest_lang), format="%.2f", key='temp_input')
+area = st.number_input(translate_text('Area (hectares)', dest_lang), format="%.2f", key='area_input')
+item = st.selectbox(translate_text('Crop Item', dest_lang), data['Item'].unique(), key='item_input')
+
+if st.button(translate_text('Predict Yield', dest_lang), key='predict_yield_button'):
+    try:
+        prediction = yield_model.predict(yield_preprocessor.transform([[year, average_rain_fall, pesticides_tonnes, avg_temp, area, item]]))
+        st.write(translate_text(f"Predicted Yield: {prediction[0]:.2f} hg/ha", dest_lang))
+    except Exception as e:
+        st.error(translate_text(f"Error: {e}", dest_lang))
+
+# Crop Recommendation Section
+st.header(translate_text("Crop Recommendation", dest_lang))
+
+# Input fields for crop recommendation
+nitrogen = st.number_input(translate_text('Nitrogen (kg/ha)', dest_lang), format="%.2f", key='nitrogen_crop_input')
+phosphorous = st.number_input(translate_text('Phosphorous (kg/ha)', dest_lang), format="%.2f", key='phosphorous_crop_input')
+potassium = st.number_input(translate_text('Potassium (kg/ha)', dest_lang), format="%.2f", key='potassium_crop_input')
+temperature = st.number_input(translate_text('Temperature (°C)', dest_lang), format="%.2f", key='temperature_crop_input')
+humidity = st.number_input(translate_text('Humidity (%)', dest_lang), format="%.2f", key='humidity_crop_input')
+ph = st.number_input(translate_text('pH', dest_lang), format="%.2f", key='ph_crop_input')
+rainfall = st.number_input(translate_text('Rainfall (mm)', dest_lang), format="%.2f", key='rainfall_crop_input')
+
+if st.button(translate_text('Recommend Crop', dest_lang), key='recommend_crop_button'):
+    try:
+        crop_prediction = crop_model.predict([[nitrogen, phosphorous, potassium, temperature, humidity, ph, rainfall]])
+        st.write(translate_text(f"Recommended Crop: {encode_crop.inverse_transform([crop_prediction[0]])[0]}", dest_lang))
+    except Exception as e:
+        st.error(translate_text(f"Error: {e}", dest_lang))
+
+# Pest Warnings Section
+st.header(translate_text("Pest Warnings", dest_lang))
+pest_crop_name = st.text_input(translate_text('Enter crop name', dest_lang), key='pest_crop_name_input')
+
+if st.button(translate_text('Fetch Pest Warnings', dest_lang), key='fetch_pest_warnings_button'):
+    if pest_crop_name:
+        pest_warnings = predict_pest_warnings(pest_crop_name)
+        if pest_warnings:
+            st.write(translate_text('Pest Warnings:', dest_lang))
+            st.text(pest_warnings)
+        else:
+            st.write(translate_text('Pest warnings data not available.', dest_lang))
+    else:
+        st.write(translate_text('Please enter a crop name.', dest_lang))
+
+# Price Prediction Section
+st.header(translate_text("Crop Price Prediction", dest_lang))
+
+# Input fields for price prediction
+state = st.text_input(translate_text('State', dest_lang), key='state_input')
+district = st.text_input(translate_text('District', dest_lang), key='district_input')
+market = st.text_input(translate_text('Market', dest_lang), key='market_input')
+commodity = st.text_input(translate_text('Commodity', dest_lang), key='commodity_input')
+day = st.number_input(translate_text('Day', dest_lang), format="%d", key='day_input')
+month = st.number_input(translate_text('Month', dest_lang), format="%d", key='month_input')
+year = st.number_input(translate_text('Year', dest_lang), format="%d", key='year_input')
+
+if st.button(translate_text('Predict Price', dest_lang), key='predict_price_button'):
+    try:
+        price_input = price_encoder.transform([[state, district, market, commodity, day, month, year]])
+        price_prediction = price_model.predict(price_input)
+        st.write(translate_text(f"Predicted Prices - Min: {price_prediction[0][0]:.2f}, Max: {price_prediction[0][1]:.2f}, Modal: {price_prediction[0][2]:.2f}", dest_lang))
     except Exception as e:
         st.error(translate_text(f"Error: {e}", dest_lang))
